@@ -1,0 +1,38 @@
+[project]
+name = "yolo_train_starter"
+version = "0.1.0"
+description = "fast start"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "colorama>=0.4.6",
+    "onnx>=1.20.1",
+    "onnxruntime-gpu>=1.23.2",
+    "onnxslim>=0.1.82",
+    "torch>=2.9.1",
+    "torchaudio>=2.9.1",
+    "torchvision>=0.24.1",
+    "ultralytics>=8.3.250",
+]
+
+[tool.uv]
+required-environments = [
+  "sys_platform == 'linux'",
+  "sys_platform == 'win32'"
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-cu130" },
+]
+torchvision = [
+  { index = "pytorch-cu130" },
+]
+torchaudio = [
+  { index = "pytorch-cu130" },
+]
