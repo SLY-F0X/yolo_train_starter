@@ -19,7 +19,9 @@
 - Папки датасета:
   - `images/train`, `images/val` — изображения
   - `labels/train`, `labels/val` — разметка YOLO (txt)
-
+- Папка с настройками модели YOLO26 под формат вывода YOLOv8 или YOLOv11:
+  - `models/yolo26.yaml`, `models/yolo26n.yaml`, `models/yolo26s.yaml
+ Что бы при экспорте в ONNX получить выходной размер 1 x 4+n x 8400 (4 координаты коробки + n классов). Для одиночного класса (nc = 1): 1x5x8400
 ## Требования
 
 - Windows 10

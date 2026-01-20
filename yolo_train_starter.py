@@ -27,8 +27,8 @@ def train_model(base_path: Path, device: str):
     ultralytics.checks()
 
     print("Using device:", device)
-
-    model = YOLO(base_path / "yolo26n.pt")
+    # Set yolo26n.yaml / yolo26s.yaml
+    model = YOLO(base_path / "models" / "yolo26n.yaml").load(base_path / "yolo26n.pt")
     model.info()
 
     model.train(
@@ -39,10 +39,11 @@ def train_model(base_path: Path, device: str):
         save=True,
         device=device,
         cache=True,
-        pretrained=True,
+        pretrained=False,
         close_mosaic=0,
         patience=100,
         verbose=True,
+        #single_cls=True
     )
 
     gc.collect()
@@ -142,7 +143,7 @@ def export_to_onnx(base_path: Path, device: str):
         return
 
     model = YOLO(model_path)
-    model.export(format="onnx", optimize=False, device=device)
+    model.export(format="onnx", imgsz=640, optimize=False, simplify=False, nms=False, device=device)
 
 
 def fine_tune_resume(base_path: Path, device: str):
@@ -172,14 +173,14 @@ def fine_tune_resume(base_path: Path, device: str):
 
 def _prepare_runtime(device_arg: str | None, set_cuda_index: int | None):
     """
-    Возвращает device строку для Ultralytics
+    Return device str for Ultralytics
     device_arg:
-      - None => auto (cuda '0' если доступно, иначе cpu)
+      - None => auto (cuda '0' if available, else cpu)
       - 'cpu' => cpu
-      - '0'/'1'/... => конкретный cuda девайс
+      - '0'/'1'/... => cuda device
     set_cuda_index:
-      - None => не трогаем torch.cuda.set_device
-      - int  => явно ставим torch.cuda.set_device(int)
+      - None => don't touch torch.cuda.set_device
+      - int  => force set torch.cuda.set_device(int)
     """
     if device_arg is None:
         device = get_device_str()
@@ -225,7 +226,7 @@ def _build_argparser() -> argparse.ArgumentParser:
     sub.add_parser("train", help="Запустить обучение.")
     sub.add_parser("val", help="Запустить валидацию по последнему train* прогону.")
     sub.add_parser("export", help="Экспорт последнего best.pt в ONNX.")
-    sub.add_parser("resume", help="Загрузить последний best.pt и дообучить")
+    sub.add_parser("resume", help="Загрузить последний best.pt и дообучить c подбором параметров")
 
     return p
 
@@ -237,7 +238,6 @@ def main(argv: list[str] | None = None):
 
     device = _prepare_runtime(args.device, args.cuda_index)
 
-    # Если запуск без аргументов (cmd is None) сразу train.
     if args.cmd is None or args.cmd == "train":
         train_model(base_path, device)
         return

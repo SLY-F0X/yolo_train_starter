@@ -1,110 +1,17 @@
-import sys
 import threading
-import queue
-import logging
 import os
 import subprocess
 import platform
-import re
 import time
+import re
+from typing import Iterable
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox
 from tkinter.scrolledtext import ScrolledText
 import tkinter.font as tkfont
-from colorama import init as colorama_init, deinit as colorama_deinit
 
 import yolo_train_starter as yts
-
-ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")  # стандартные ANSI CSI
-ANSI_OSC_RE = re.compile(r"\x1b\].*?\x07")
-CTRL_OTHER_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
-
-def strip_ansi(s: str) -> str:
-    s = ANSI_OSC_RE.sub("", s)
-    s = ANSI_RE.sub("", s)
-    return s
-
-
-def normalize_stream_text(s: str) -> str:
-    s = strip_ansi(s)
-    s = CTRL_OTHER_RE.sub("", s)
-    s = s.replace("\r", "\n")
-    return s
-
-
-def _is_emoji_char(ch: str) -> bool:
-    if not ch:
-        return False
-    o = ord(ch)
-
-    if o == 0x200D:
-        return True
-
-    if 0x1F000 <= o <= 0x1FAFF:
-        return True
-    if 0x2600 <= o <= 0x27BF:
-        return True
-    if 0xFE00 <= o <= 0xFE0F:
-        return True
-    if 0x1F1E6 <= o <= 0x1F1FF:
-        return True
-    return False
-
-
-def _emoji_spans(s: str):
-    spans = []
-    start = None
-    for i, ch in enumerate(s):
-        is_e = _is_emoji_char(ch)
-        if is_e and start is None:
-            start = i
-        elif (not is_e) and start is not None:
-            spans.append((start, i))
-            start = None
-    if start is not None:
-        spans.append((start, len(s)))
-    return spans
-
-
-class QueueWriter:
-    def __init__(self, q: queue.Queue, stream_name: str):
-        self.q = q
-        self.stream_name = stream_name
-
-    def write(self, data):
-        if isinstance(data, bytes):
-            try:
-                data = data.decode("utf-8", errors="replace")
-            except Exception:
-                data = data.decode(errors="replace")
-        if not isinstance(data, str):
-            data = str(data)
-        if not data:
-            return
-
-        try:
-            self.q.put_nowait((self.stream_name, data))
-        except queue.Full:
-            pass
-
-    def flush(self):
-        pass
-
-
-
-class LoggingToQueueHandler(logging.Handler):
-    def __init__(self, q: queue.Queue):
-        super().__init__()
-        self.q = q
-        self.log_queue = queue.Queue(maxsize=50000)
-
-    def emit(self, record):
-        try:
-            msg = self.format(record)
-        except Exception:
-            msg = record.getMessage()
-        self.q.put(("log", msg + "\n"))
 
 
 def open_folder_cross_platform(path: Path):
@@ -121,35 +28,61 @@ def open_folder_cross_platform(path: Path):
         subprocess.run(["xdg-open", str(path)], check=False)
 
 
+def _latest_run_dir(runs_path: Path, prefix: str) -> Path | None:
+    """
+    Search for: prefix, prefix2, prefix3 ...
+    """
+    best = None
+    best_num = -1
+    # train, train2, train3... | val, val2, val3...
+    pattern = re.compile(rf"^{re.escape(prefix)}(\d+)?$")
+
+    for d in runs_path.iterdir():
+        if not d.is_dir():
+            continue
+        m = pattern.match(d.name)
+        if not m:
+            continue
+        num = int(m.group(1)) if m.group(1) else 1
+        if num > best_num:
+            best_num = num
+            best = d
+
+    return best
+
+
+def _newest_by_mtime(paths: Iterable[Path]) -> Path | None:
+    best = None
+    best_ts = -1.0
+    for p in paths:
+        try:
+            ts = p.stat().st_mtime
+        except OSError:
+            continue
+        if ts > best_ts:
+            best_ts = ts
+            best = p
+    return best
+
+
 class YoloTrainerGUI(tk.Tk):
     def __init__(self):
         super().__init__()
 
         self.title("YOLO Train Starter GUI")
-        self.geometry("980x640")
+        self.geometry("680x340")
 
-        self.log_queue = queue.Queue()
         self.worker_thread = None
-
         self.base_path = yts.get_base_path()
 
         self._build_styles_and_fonts()
         self._build_ui()
 
-        self.after(50, self._drain_log_queue)
-
-        self._orig_stdout = sys.stdout
-        self._orig_stderr = sys.stderr
-        sys.stdout = QueueWriter(self.log_queue, "stdout")
-        sys.stderr = QueueWriter(self.log_queue, "stderr")
-
-        self._install_logging_handler()
-
         self._append_text(f"Base path: {self.base_path}\n")
-        self._append_text("GUI ready ✅\n")
+        self._append_text("GUI ready\n")
 
-        self._refresh_devices()
-        self._check_cuda(silent=True)
+        self._refresh_devices(autoselect=True, log=True)
+        self._check_cuda(silent=True, refresh_devices=False)
 
     def _build_styles_and_fonts(self):
         families = set(tkfont.families(self))
@@ -163,17 +96,7 @@ class YoloTrainerGUI(tk.Tk):
         else:
             mono_family = "TkFixedFont"
 
-        if "Segoe UI Emoji" in families:
-            emoji_family = "Segoe UI Emoji"
-        elif "Noto Color Emoji" in families:
-            emoji_family = "Noto Color Emoji"
-        elif "Apple Color Emoji" in families:
-            emoji_family = "Apple Color Emoji"
-        else:
-            emoji_family = mono_family
-
         self.log_font = tkfont.Font(family=mono_family, size=10)
-        self.emoji_font = tkfont.Font(family=emoji_family, size=10)
 
     def _build_ui(self):
         top = ttk.Frame(self, padding=10)
@@ -187,14 +110,16 @@ class YoloTrainerGUI(tk.Tk):
             textvariable=self.device_var,
             values=["cpu"],
             state="readonly",
-            width=10
+            width=10,
         )
         self.device_combo.pack(side=tk.LEFT, padx=(6, 16))
 
         self.cuda_info_var = tk.StringVar(value="CUDA available: (unknown)")
         ttk.Label(top, textvariable=self.cuda_info_var).pack(side=tk.LEFT)
 
-        ttk.Button(top, text="Refresh devices", command=self._refresh_devices).pack(side=tk.LEFT, padx=(16, 6))
+        ttk.Button(top, text="Refresh devices", command=self._refresh_devices).pack(
+            side=tk.LEFT, padx=(16, 6)
+        )
         ttk.Button(top, text="Check CUDA", command=self._check_cuda).pack(side=tk.LEFT)
 
         actions = ttk.Frame(self, padding=(10, 0, 10, 10))
@@ -224,50 +149,60 @@ class YoloTrainerGUI(tk.Tk):
         self.log_text = ScrolledText(log_frame, wrap=tk.WORD, font=self.log_font)
         self.log_text.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
-        self.log_text.tag_configure("emoji", font=self.emoji_font)
-
-        self.log_text.configure(state=tk.NORMAL)
-        self.log_text.insert(tk.END, "")
         self.log_text.configure(state=tk.DISABLED)
 
-    def _install_logging_handler(self):
-        handler = LoggingToQueueHandler(self.log_queue)
-        handler.setLevel(logging.INFO)
-        handler.setFormatter(logging.Formatter("[%(levelname)s] %(name)s: %(message)s"))
+    def _ui_log(self, s: str):
+        self.after(0, self._append_text, s)
 
-        root_logger = logging.getLogger()
-        root_logger.setLevel(logging.INFO)
-        root_logger.addHandler(handler)
-
-        logging.getLogger("ultralytics").setLevel(logging.INFO)
-
-    def _refresh_devices(self):
+    def _refresh_devices(self, autoselect: bool = False, log: bool = True):
         try:
             import torch
 
             values = ["cpu"]
-            if torch.cuda.is_available():
-                n = torch.cuda.device_count()
-                for i in range(n):
-                    values.append(str(i))
+            avail = torch.cuda.is_available()
+            n = torch.cuda.device_count() if avail else 0
+
+            if avail and n > 0:
+                values.extend([str(i) for i in range(n)])
+
+            current_values = list(self.device_combo["values"]) if self.device_combo["values"] else ["cpu"]
+            if len(values) > 1 or current_values == ["cpu"]:
+                self.device_combo["values"] = values
+            else:
+                values = current_values
 
             current = self.device_var.get().strip()
-            self.device_combo["values"] = values
+
+            if autoselect and current == "cpu" and "0" in values:
+                self.device_var.set("0")
+                current = "0"
 
             if current not in values:
                 self.device_var.set("cpu")
 
-            self._append_text(f"Devices refreshed: {values}\n")
+            if log:
+                self._append_text(f"Devices refreshed: {list(values)}\n")
+
         except Exception as e:
             self._append_text(f"Refresh devices error: {e}\n")
-            self.device_combo["values"] = ["cpu"]
-            self.device_var.set("cpu")
+            if not self.device_combo["values"]:
+                self.device_combo["values"] = ["cpu"]
+            if self.device_var.get().strip() not in self.device_combo["values"]:
+                self.device_var.set("cpu")
 
-    def _check_cuda(self, silent: bool = False):
+
+    def _check_cuda(self, silent: bool = False, refresh_devices: bool = True):
         try:
             import torch
 
             avail = torch.cuda.is_available()
+            if avail:
+                try:
+                    _ = torch.cuda.current_device()
+                    _ = torch.cuda.get_device_name(_)
+                except Exception:
+                    avail = False
+
             n = torch.cuda.device_count() if avail else 0
             self.cuda_info_var.set(f"CUDA available: {avail} | GPUs: {n}")
 
@@ -285,11 +220,121 @@ class YoloTrainerGUI(tk.Tk):
                 except Exception as e:
                     self._append_text(f"Failed to set CUDA device {dev}: {e}\n")
                     self.device_var.set("cpu")
-            self._refresh_devices()
+
+            if refresh_devices:
+                self._refresh_devices(autoselect=True, log=not silent)
 
         except Exception as e:
             self.cuda_info_var.set("CUDA available: error")
             self._append_text(f"CUDA check error: {e}\n")
+
+
+    def _collect_artifacts(self, label: str) -> str:
+        runs_path = self.base_path / "runs" / "detect"
+        if not runs_path.exists():
+            return "Artifacts: runs/detect not found.\n"
+
+        lines = []
+        lines.append("Artifacts:\n")
+
+        label_l = label.lower()
+
+        # TRAIN
+        if "train" in label_l:
+            train_dir = _latest_run_dir(runs_path, "train")
+            if not train_dir:
+                return "Artifacts: no train* dirs found.\n"
+
+            lines.append(f"  run dir: {train_dir}\n")
+
+            wdir = train_dir / "weights"
+            best_pt = wdir / "best.pt"
+            last_pt = wdir / "last.pt"
+            if best_pt.exists():
+                lines.append(f"  best.pt: {best_pt}\n")
+            if last_pt.exists():
+                lines.append(f"  last.pt: {last_pt}\n")
+
+            for name in ("results.csv", "results.png", "args.yaml"):
+                p = train_dir / name
+                if p.exists():
+                    lines.append(f"  {name}: {p}\n")
+
+            return "".join(lines)
+
+        # VALIDATE
+        if "validate" in label_l or "val" in label_l:
+            val_dir = _latest_run_dir(runs_path, "val")
+            if not val_dir:
+                return "Artifacts: no val* dirs found.\n"
+
+            lines.append(f"  val dir: {val_dir}\n")
+
+            common = [
+                "confusion_matrix.png",
+                "confusion_matrix_normalized.png",
+            ]
+            for name in common:
+                p = val_dir / name
+                if p.exists():
+                    lines.append(f"  {name}: {p}\n")
+
+            return "".join(lines)
+
+        # EXPORT
+        if "export" in label_l and "onnx" in label_l:
+            train_dir = _latest_run_dir(runs_path, "train")
+            if not train_dir:
+                return "Artifacts: no train* dirs found (can't locate best.pt for export).\n"
+
+            wdir = train_dir / "weights"
+            best_pt = wdir / "best.pt"
+            lines.append(f"  weights dir: {wdir}\n")
+            if best_pt.exists():
+                lines.append(f"  source: {best_pt}\n")
+
+            onnx_files = list(wdir.glob("*.onnx"))
+            newest = _newest_by_mtime(onnx_files)
+            if newest:
+                lines.append(f"  onnx: {newest}\n")
+            else:
+                expected = best_pt.with_suffix(".onnx")
+                if expected.exists():
+                    lines.append(f"  onnx: {expected}\n")
+                else:
+                    lines.append("  onnx: not found in weights dir.\n")
+
+            return "".join(lines)
+
+        # RESUME / TUNE
+        if "fine-tune" in label_l or "resume" in label_l or "tune" in label_l:
+            candidates = []
+            for d in runs_path.iterdir():
+                if d.is_dir() and d.name.startswith("finetune_model"):
+                    candidates.append(d)
+            finedir = _newest_by_mtime(candidates) if candidates else None
+
+            if finedir:
+                lines.append(f"  tune dir: {finedir}\n")
+                wdir = finedir / "weights"
+                if wdir.exists():
+                    best_pt = wdir / "best.pt"
+                    last_pt = wdir / "last.pt"
+                    if best_pt.exists():
+                        lines.append(f"  best.pt: {best_pt}\n")
+                    if last_pt.exists():
+                        lines.append(f"  last.pt: {last_pt}\n")
+                return "".join(lines)
+
+            train_dir = _latest_run_dir(runs_path, "train")
+            if train_dir:
+                lines.append(f"  (fallback) latest train dir: {train_dir}\n")
+                return "".join(lines)
+
+            return "Artifacts: nothing found.\n"
+
+        return "Artifacts: (no collector rule for this action)\n"
+
 
     def _open_runs_detect(self):
         runs_detect = self.base_path / "runs" / "detect"
@@ -318,18 +363,26 @@ class YoloTrainerGUI(tk.Tk):
         base_path = self.base_path
 
         def runner():
-            self.log_queue.put(("stdout", f"\n--- {label} started ---\n"))
+            self._ui_log(f"\n--- {label} started ---\n")
             try:
                 target(base_path, device)
-                self.log_queue.put(("stdout", f"--- {label} finished ✅ ---\n"))
+                self._ui_log(f"--- {label} finished ---\n")
+
+                try:
+                    artifacts_text = self._collect_artifacts(label)
+                    self._ui_log(artifacts_text)
+                except Exception as e:
+                    self._ui_log(f"Artifacts collection error: {e}\n")
+
             except Exception as e:
-                self.log_queue.put(("stderr", f"--- {label} failed ❌: {e} ---\n"))
+                self._ui_log(f"--- {label} failed: {e} ---\n")
             finally:
-                self.log_queue.put(("ui", "ENABLE_BUTTONS"))
+                self.after(0, self._set_buttons_enabled, True)
 
         self._set_buttons_enabled(False)
         self.worker_thread = threading.Thread(target=runner, daemon=True)
         self.worker_thread.start()
+
 
     def _on_train(self):
         self._run_in_thread(yts.train_model, "Train model")
@@ -350,82 +403,15 @@ class YoloTrainerGUI(tk.Tk):
 
     def _append_text(self, s: str):
         self.log_text.configure(state=tk.NORMAL)
-
-        start_index = self.log_text.index(tk.END)
         self.log_text.insert(tk.END, s)
-
-        spans = _emoji_spans(s)
-        for a, b in spans:
-            idx_a = f"{start_index}+{a}c"
-            idx_b = f"{start_index}+{b}c"
-            self.log_text.tag_add("emoji", idx_a, idx_b)
-
         self.log_text.see(tk.END)
         self.log_text.configure(state=tk.DISABLED)
 
 
-    def _drain_log_queue(self):
-        start = time.monotonic()
-
-        MAX_ITEMS = 500
-        MAX_SECONDS = 0.01
-
-        chunks = []
-        ui_enable = False
-
-        items = 0
-        try:
-            while items < MAX_ITEMS and (time.monotonic() - start) < MAX_SECONDS:
-                stream, data = self.log_queue.get_nowait()
-
-                if stream == "ui" and data == "ENABLE_BUTTONS":
-                    ui_enable = True
-                    items += 1
-                    continue
-
-                if isinstance(data, bytes):
-                    try:
-                        data = data.decode("utf-8", errors="replace")
-                    except Exception:
-                        data = data.decode(errors="replace")
-                if not isinstance(data, str):
-                    data = str(data)
-
-                data = normalize_stream_text(data)
-                if data:
-                    chunks.append(data)
-
-                items += 1
-
-        except queue.Empty:
-            pass
-        finally:
-            if chunks:
-                self._append_text("".join(chunks))
-
-            if ui_enable:
-                self._set_buttons_enabled(True)
-
-            self.after(50, self._drain_log_queue)
-
-
-    def destroy(self):
-        try:
-            sys.stdout = self._orig_stdout
-            sys.stderr = self._orig_stderr
-        except Exception:
-            pass
-        super().destroy()
-
-
 def main():
-    colorama_init(autoreset=True, strip=True, convert=False)
+    app = YoloTrainerGUI()
+    app.mainloop()
 
-    try:
-        app = YoloTrainerGUI()
-        app.mainloop()
-    finally:
-        colorama_deinit()
 
 if __name__ == "__main__":
     main()

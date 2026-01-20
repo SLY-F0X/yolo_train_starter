@@ -1,5 +1,8 @@
 train: ../images/train
 val: ../images/val
 
+# Parameters
+nc: 1
+
 names:
   0: Object
